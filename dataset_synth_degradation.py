@@ -3,7 +3,6 @@ import cv2
 import ast
 import io
 import torch
-import ujson as json
 import numpy as np
 import random
 from script.resize import imresize_np
@@ -11,9 +10,12 @@ from torch.utils.data import DataLoader, Dataset
 
 cv2.setNumThreads(1)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class AdobeDataset(Dataset):
-    def __init__(self, dataset_name, batch_size=32):
+    def __init__(self, dataset_name, root_dir, batch_size=32):
         self.batch_size = batch_size
+        self.root_dir = root_dir
         self.dataset_name = dataset_name
         self.load_data()
         self.allframe = True
@@ -24,34 +26,35 @@ class AdobeDataset(Dataset):
     def load_data(self):
         def read(name):
             data_list = []
-            with open("data/adobe240fps_folder_{}.txt".format(name)) as f:
+            with open(os.path.join(self.root_dir, f"adobe240fps_folder_{name}.txt")) as f:
                 data = f.readlines()
                 for l in data:
                     l = l.strip('\n')
-                    path = '/data/adobe240/frame/{}/{}'.format(name, l)
+                    path = os.path.join(self.root_dir, "images", f'{l}')
                     interval = 1
                     if name != 'train':
                         interval = 9
                     for i in range(0, len(os.listdir(path)) - 9, interval):
                         data_tuple = []
                         for j in range(9):
-                            data_tuple.append('{}/{}.png'.format(path, i+j))
+                            data_tuple.append('{}/{:05d}.png'.format(path, i + j))
                         data_list.append(data_tuple)
             return data_list
+
         self.meta_data = read(self.dataset_name)
-        self.nr_sample = len(self.meta_data)        
+        self.nr_sample = len(self.meta_data)
 
     def aug(self, imgs, h, w):
-        ih, iw, _ = imgs[0].shape        
+        ih, iw, _ = imgs[0].shape
         x = np.random.randint(0, ih - h + 1)
         y = np.random.randint(0, iw - w + 1)
         for i in range(len(imgs)):
-            imgs[i] = imgs[i][x:x+h, y:y+w, :]
+            imgs[i] = imgs[i][x:x + h, y:y + w, :]
         return imgs
 
     def read(self, x):
         return cv2.imread(x)
-    
+
     def getimg(self, index, training=False):
         data = self.meta_data[index]
         if not training:
@@ -65,7 +68,7 @@ class AdobeDataset(Dataset):
                 imgs.append(self.read(data[8]))
             step = 0.5
         else:
-            ind = [1, 2, 3, 4, 5, 6, 7]   
+            ind = [1, 2, 3, 4, 5, 6, 7]
             random.shuffle(ind)
             ind[1] = ind[0]
             ind[0] = 0
@@ -74,7 +77,7 @@ class AdobeDataset(Dataset):
             gt = self.read(data[ind[1]])
             img1 = self.read(data[ind[2]])
             step = (ind[1] - ind[0]) * 1.0 / (ind[2] - ind[0])
-            imgs = [img0, gt, img1]            
+            imgs = [img0, gt, img1]
         return imgs, step
 
     def unsharp_mask(self, image, kernel_size=(5, 5), sigma=1.0, amount=1.0, threshold=0):
@@ -91,7 +94,7 @@ class AdobeDataset(Dataset):
             low_contrast_mask = np.absolute(image - blurred) < threshold
             np.copyto(sharpened, image, where=low_contrast_mask)
         return sharpened
-            
+
     def __getitem__(self, index):
         if self.dataset_name == 'train':
             imgs, timestep = self.getimg(index, True)
@@ -126,11 +129,11 @@ class AdobeDataset(Dataset):
             imgs, timestep = self.getimg(index, training=False)
         imgs = torch.from_numpy(np.concatenate(imgs.copy(), 2)).permute(2, 0, 1)
         timestep = torch.tensor(timestep).reshape(1, 1, 1)
-        
+
         # for img in imgs:
         #    lowres.append(cv2.resize(imresize_np(img, 0.25), (0, 0), fx=4, fy=4, interpolation=cv2.INTER_CUBIC))
         # We synthesize data like RealESRGAN
-        
+
         lowres = imgs.clone()
         lowres = lowres.reshape(3, 3, 128, 128).permute(0, 2, 3, 1).numpy()
         origin_lowres = [lowres[0].copy(), lowres[1].copy(), lowres[2].copy()]
@@ -144,14 +147,16 @@ class AdobeDataset(Dataset):
             for i in range(3):
                 lowres[i] = cv2.imencode(".jpg", lowres[i], params)[1]
                 lowres[i] = cv2.imdecode(np.frombuffer(lowres[i], np.uint8), cv2.IMREAD_COLOR)
+
         def addnoise(image):
             mean = 0
             sigma = random.uniform(0, 0.05)
-            gauss = np.random.normal(mean,sigma,image.shape)
+            gauss = np.random.normal(mean, sigma, image.shape)
             if random.uniform(0, 1) < 0.5:
                 gauss = np.mean(gauss, 2, keepdims=True)
-            image = np.clip(image/255.+gauss, 0, 1) * 255
+            image = np.clip(image / 255. + gauss, 0, 1) * 255
             return image.astype('uint8')
+
         if random.uniform(0, 1) < 0.3:
             for i in range(3):
                 lowres[i] = cv2.GaussianBlur(lowres[i], (5, 5), 0)
@@ -170,9 +175,10 @@ class AdobeDataset(Dataset):
         if random.uniform(0, 1) < 0.3:
             p = random.uniform(0.5, 1)
             for i in range(3):
-                lowres[i] = ((lowres[i]/255. * p + origin_lowres[i]/255. * (1 - p)) * 255).astype('uint8')
+                lowres[i] = ((lowres[i] / 255. * p + origin_lowres[i] / 255. * (1 - p)) * 255).astype('uint8')
         lowres = torch.from_numpy(np.concatenate(lowres, 2)).permute(2, 0, 1)
         return imgs, lowres, timestep
-    
+
+
 if __name__ == '__main__':
-    ds = DataLoader(AdobeDataset('train'))
+    ds = DataLoader(AdobeDataset('train', root_dir="/media/ms-neo2/ms-ssd11/1.dataset/VFI/adobe240fps"))
