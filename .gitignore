@@ -6,7 +6,10 @@
 output/*
 train_log/*
 *.mp4
+*.png
 
+train/
+validate/
 test/
 .idea/
 *.npz

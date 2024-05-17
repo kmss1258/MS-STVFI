@@ -61,3 +61,23 @@ class Head(nn.Module):
         f1 = F.interpolate(self.out1(f1), scale_factor=2.0, mode="bilinear")
         f2 = F.interpolate(self.out2(f2), scale_factor=4.0, mode="bilinear")
         return f0 + f1 + f2
+
+
+if __name__ == '__main__':
+
+    # benchmark using cpu
+    import time
+    time_start = time.time()
+
+    model = Head(60)
+    device = torch.device("cpu")
+    model = model.to(device)
+    model.eval()
+    x = torch.rand(1, 3, 256, 256)
+
+    for i in range(50):
+        with torch.no_grad():
+            y = model(x)
+
+    time_end = time.time()
+    print('time cost', time_end-time_start, 's')

@@ -38,10 +38,6 @@ def flow2rgb(flow_map_np):
     rgb_map[:, :, 2] += normalized_flow_map[:, :, 1]
     return rgb_map.clip(0, 1)
 
-def tensor2image(img):
-    img = img.permute(1, 2, 0).cpu().numpy()
-    return (img * 255).astype('uint8')
-
 def rgb2y(img):
     return 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
 
@@ -59,17 +55,11 @@ def train(model, local_rank):
     train_data = DataLoader(dataset, batch_size=args.batch_size, num_workers=2, pin_memory=True, drop_last=True, sampler=sampler)
     args.step_per_epoch = train_data.__len__()
     dataset_val = AdobeDataset('test', args.root_dir)
-    val_data = DataLoader(dataset_val, batch_size=args.batch_size, pin_memory=True, num_workers=2)
+    val_data = DataLoader(dataset_val, batch_size=16, pin_memory=True, num_workers=2)
     print('training...')
     time_stamp = time.time()
     for epoch in range(args.epoch):
         sampler.set_epoch(epoch)
-
-        if nr_eval % 1 == 0:
-            evaluate(model, val_data, step, local_rank, writer_val, current_epoch=epoch)
-        dist.barrier()
-
-        # train with mixed precision
 
         psnr_list = []
         for i, data in enumerate(train_data):
@@ -77,7 +67,6 @@ def train(model, local_rank):
             time_stamp = time.time()
             data_gpu, lowres, timestep = data
             data_gpu = data_gpu.to(device, non_blocking=True) / 255.
-            lowres = lowres.to(device, non_blocking=True) / 255.
             timestep = timestep.to(device, non_blocking=True)
             imgs = data_gpu
             lowres = torch.cat((lowres[:, :3], lowres[:, 6:9]), 1)
@@ -114,90 +103,51 @@ def train(model, local_rank):
                 sys.stdout.flush()
 
             step += 1
+        nr_eval += 1
+        if nr_eval % 5 == 0:
+            evaluate(model, val_data, step, local_rank, writer_val)
         model.save_model(log_path, local_rank)
         dist.barrier()
-        nr_eval += 1
 
-# def evaluate(model, val_data, nr_eval, local_rank, writer_val):
-#     loss_l1_list = []
-#     psnr_list = []
-#     time_stamp = time.time()
-#     for i, data in tqdm(enumerate(val_data), total=len(val_data)):
-#         if i > 10:
-#             break
-#         imgs, lowres, timestep = data
-#         imgs = imgs.to(device, non_blocking=True) / 255.
-#         lowres = lowres.to(device, non_blocking=True) / 255.
-#         i1, i2, i3 = imgs.chunk(3, dim=1)
-#         l1, l2, l3 = lowres.chunk(3, dim=1)
-#         imgs = imgs.chunk(3, dim=1)
-#         with torch.no_grad():
-#             res, info = model.update(torch.cat((i1, i2, i3), 1), torch.cat((l1, l3), 1), training=False)
-#         loss_l1_list.append(info['loss_l1'].cpu().numpy())
-#         for j in range(res[0].shape[0]):
-#             psnr_all = []
-#             for k in range(3):
-#                 # pred_y = rgb2y(res[k][j].permute(1, 2, 0))
-#                 # gt_y = rgb2y(imgs[k][j].permute(1, 2, 0))
-#                 pred_y = res[k][j].permute(1, 2, 0)
-#                 gt_y = imgs[k][j].permute(1, 2, 0)
-#                 psnr_all.append(-10 * math.log10(torch.mean((gt_y - pred_y) * (gt_y - pred_y)).cpu().data))
-#             psnr_list.append(np.array(psnr_all).mean())
-#         flow0 = info['flow'].permute(0, 2, 3, 1).cpu().numpy()
-#         if i == 0 and local_rank == 0:
-#             k = 1
-#             gt = (imgs[k].permute(0, 2, 3, 1).cpu().numpy() * 255).astype('uint8')
-#             pred = (res[k].permute(0, 2, 3, 1).cpu().numpy() * 255).astype('uint8')
-#             for j in range(pred.shape[0]):
-#                 # imgs = np.concatenate((pred[j], gt[j]), 3)[:, :, ::-1]
-#                 # writer_val.add_image(str(j) + '/img{}'.format(k), imgs.copy(), nr_eval, dataformats='HWC')
-#                 writer_val.add_image(str(j) + '/flow', flow2rgb(flow0[j][:, :, ::-1]), nr_eval, dataformats='HWC')
-#
-#     eval_time_interval = time.time() - time_stamp
-#
-#     if local_rank == 0:
-#         print(args.exp_name, np.array(psnr_list).mean())
-#         writer_val.add_scalar('{}_psnr'.format(args.exp_name), np.array(psnr_list).mean(), nr_eval)
-
-
-def evaluate(model, val_data, nr_eval, local_rank, writer_val, current_epoch):
+def evaluate(model, val_data, nr_eval, local_rank, writer_val):
     loss_l1_list = []
     psnr_list = []
     time_stamp = time.time()
-    for i, data in enumerate(tqdm(val_data)):
-        if i > 10:
+    for i, data in enumerate(val_data):
+        if i > 200:
             break
         imgs, lowres, timestep = data
         imgs = imgs.to(device, non_blocking=True) / 255.
         lowres = lowres.to(device, non_blocking=True) / 255.
-        high_res_list = imgs.chunk(9, dim=1)
-        low_res_list = lowres.chunk(9, dim=1)
+        i1, i2, i3 = imgs.chunk(3, dim=1)
+        l1, l2, l3 = lowres.chunk(3, dim=1)
         imgs = imgs.chunk(3, dim=1)
         with torch.no_grad():
-            # results = model.inference(low_res_list[0], low_res_list[-1], timestep=[0, 1/8, 2/8, 3/8, 4/8, 5/8, 6/8, 7/8, 1])
-            res, info = model.update(torch.cat(high_res_list, 1), torch.cat((low_res_list[0], low_res_list[-1]), 1), training=False)
-
-        for pred_img, high_res_img in zip(res, high_res_list):
-            # calculate psnr between pred_img and high_res_list. pred_img size is [batch, 3, H, W]
+            res, info = model.update(torch.cat((i1, i2, i3), 1), torch.cat((l1, l3), 1), training=False)
+        loss_l1_list.append(info['loss_l1'].cpu().numpy())
+        for j in range(res[0].shape[0]):
             psnr_all = []
-            for k in range(pred_img.shape[0]):
-                pred_y = pred_img[k].permute(1, 2, 0) * 255
-                gt_y = high_res_img[k].permute(1, 2, 0) * 255
-                # convert to uint8, not convert to numpy
-                pred_y, gt_y = pred_y.type(torch.uint8).type(torch.float32), gt_y.type(torch.uint8).type(torch.float32)
+            for k in range(3):
+                pred_y = rgb2y(res[k][j].permute(1, 2, 0))
+                gt_y = rgb2y(imgs[k][j].permute(1, 2, 0))
                 psnr_all.append(-10 * math.log10(torch.mean((gt_y - pred_y) * (gt_y - pred_y)).cpu().data))
-
-                # concat visualization (concat)
-                combined_image = np.concatenate((pred_y.cpu().numpy(), gt_y.cpu().numpy()), axis=1)
-                os.makedirs('./result', exist_ok=True)
-                cv2.imwrite(f'./result/epoch{current_epoch:03d}_{nr_eval}_{i}_{k}.png', combined_image)
-
             psnr_list.append(np.array(psnr_all).mean())
+        flow0 = info['flow'].permute(0, 2, 3, 1).cpu().numpy()
+        if i == 0 and local_rank == 0:
+                k = 1
+                gt = (imgs[k].permute(0, 2, 3, 1).cpu().numpy() * 255).astype('uint8')
+                pred = (res[k].permute(0, 2, 3, 1).cpu().numpy() * 255).astype('uint8')
+                for j in range(pred.shape[0]):
+                    imgs = np.concatenate((pred[j], gt[j]), 1)[:, :, ::-1]
+                    writer_val.add_image(str(j) + '/img{}'.format(k), imgs.copy(), nr_eval, dataformats='HWC')
+                    writer_val.add_image(str(j) + '/flow', flow2rgb(flow0[j][:, :, ::-1]), nr_eval, dataformats='HWC')
 
-        # loss_l1_list.append(info['loss_l1'].cpu().numpy())
-    # print('eval time:', time.time() - time_stamp)
+    eval_time_interval = time.time() - time_stamp
+
     if local_rank == 0:
-        print("PSNR : ", args.exp_name, np.array(psnr_list).mean())
+        print(args.exp_name, np.array(psnr_list).mean())
+        writer_val.add_scalar('{}_psnr'.format(args.exp_name), np.array(psnr_list).mean(), nr_eval)
+
 
 def get_current_time():
     return time.strftime('%Y%m%d_%H%M%S', time.localtime(time.time()))
@@ -205,7 +155,7 @@ def get_current_time():
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser()
     parser.add_argument('--epoch', default=220, type=int)
-    parser.add_argument('--batch_size', default=6, type=int, help='minibatch size')
+    parser.add_argument('--batch_size', default=8, type=int, help='minibatch size')
     parser.add_argument('--local_rank', default=0, type=int, help='local rank')
     parser.add_argument('--world_size', default=1, type=int, help='world size')
     parser.add_argument('--exp_name', default=get_current_time(), type=str, help='experiment name')
@@ -220,6 +170,6 @@ if __name__ == "__main__":
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = True
     model = Model(args.local_rank)
-    model.load_model('train_log_240425', rank=-1) # module.WEIGHT
+    model.load_model('train_log', rank=-1) # module.WEIGHT
     train(model, args.local_rank)
         

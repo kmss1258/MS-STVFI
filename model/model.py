@@ -4,7 +4,7 @@ import numpy as np
 from torch.optim import AdamW
 import torch.optim as optim
 import itertools
-from model.warplayer import warp
+# from model.warplayer import warp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from model.flownet import *
 import torch.nn.functional as F
@@ -56,6 +56,8 @@ class Model:
         
     def save_model(self, path, rank=0):
         if rank == 0:
+            import os
+            os.makedirs(path, exist_ok=True)
             torch.save(self.flownet.state_dict(),'{}/flownet.pkl'.format(path))
 
     def update(self, imgs, lowres, learning_rate=0, timestep=0.5, mul=1, training=True):
@@ -88,3 +90,16 @@ class Model:
             'flow': flow[:, :2],
             'loss_l1': loss_l1,
             }
+
+if __name__ == '__main__':
+    model = Model()
+    img0, img1, timestep = torch.randn(1, 6, 256, 256), torch.randn(1, 6, 256, 256), torch.randn(1, 1, 128, 128)
+    out = model.inference(img0, img1, timestep)
+    for i in range(20):
+        with torch.no_grad():
+            y = model.inference(img0, img1, timestep)
+    from torch.profiler import profile, record_function, ProfilerActivity
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        with record_function("model_inference"):
+            y = model.inference(img0, img1, timestep)
+    print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
