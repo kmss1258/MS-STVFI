@@ -1,4 +1,4 @@
-3# SAFA: Scale-Adaptive Feature Aggregation for Efficient Space-Time Video Super-Resolution
+# SAFA: Scale-Adaptive Feature Aggregation for Efficient Space-Time Video Super-Resolution
 
 ## Overview
 
@@ -15,12 +15,11 @@ pip install -r requirements.txt
 ```
 
 ## Training
-535`12`523
 ```bash
 python3 -m torch.distributed.run --nproc_per_node=1 train_refactoring.py --world_size=1
 ```
 
-## Custom Data Prepare
+## Data Prepare
 
 ``` 
 wget http://data.csail.mit.edu/tofu/dataset/vimeo_triplet.zip
